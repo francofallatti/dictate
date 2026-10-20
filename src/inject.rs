@@ -3,7 +3,7 @@
 
 use crate::config::PasteConfig;
 use crate::hotkey::key_input;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -96,13 +96,30 @@ fn send_ctrl_v() -> Result<()> {
     Ok(())
 }
 
+/// Retries a clipboard operation: other apps hold the clipboard open for short moments and
+/// Windows then fails with "access denied".
+fn clipboard_retry<T>(what: &str, mut op: impl FnMut() -> std::result::Result<T, arboard::Error>) -> Result<T> {
+    let mut last: Option<arboard::Error> = None;
+    for attempt in 0..8 {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                debug!(attempt, error = %e, "{what} failed, retrying");
+                last = Some(e);
+                sleep(Duration::from_millis(25 * (attempt + 1) as u64));
+            }
+        }
+    }
+    Err(anyhow::anyhow!("{what} failed after retries: {}", last.map(|e| e.to_string()).unwrap_or_default()))
+}
+
 /// Pastes `text` into the focused control.
 pub fn paste_text(text: &str, cfg: &PasteConfig) -> Result<()> {
-    let mut clip = arboard::Clipboard::new().context("opening clipboard")?;
+    let mut clip = clipboard_retry("opening clipboard", arboard::Clipboard::new)?;
     let previous = clip.get_text().ok();
     debug!(prev_len = previous.as_ref().map(|p| p.len()).unwrap_or(0), "saved previous clipboard");
 
-    clip.set_text(text.to_string()).context("writing clipboard")?;
+    clipboard_retry("writing clipboard", || clip.set_text(text.to_string()))?;
     wait_modifiers_released(Duration::from_millis(1500));
     send_ctrl_v()?;
     info!(chars = text.chars().count(), "paste sent");

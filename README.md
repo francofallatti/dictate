@@ -27,6 +27,13 @@ no accounts, local transcription by default, optional cloud backends you control
   changed it. Injects a masking key so the Win key alone does not open the Start menu.
 - **Tray icon** with state colours (grey idle, red listening, orange hands-free, blue processing),
   system sounds, daily log files and a JSONL history of every dictation.
+- **Hub window** (left-click the tray icon, or `dictate --panel`), modelled on Wispr Flow's hub:
+  - *Inicio*: stats (words, words this week, wpm, pasted/total), search, history grouped by day
+    with copy / details / delete per row;
+  - *Configuración*: every setting from `config.toml` with validation; "Guardar y aplicar"
+    hot-reloads the chord, microphone and backends without restarting;
+  - *Diagnóstico*: live state, backend/mic/chord, in-flight jobs, last error, a session event
+    stream and the tail of today's log. Closing the window only hides it.
 - **CLI mode** for testing backends without a microphone: `dictate --transcribe file.wav`.
 
 ## Build

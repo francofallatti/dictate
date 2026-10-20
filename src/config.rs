@@ -5,7 +5,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub hotkey: HotkeyConfig,
@@ -17,7 +17,7 @@ pub struct Config {
     pub ui: UiConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
     /// Keys that must be held together to dictate. Names: ctrl, lctrl, rctrl, win, lwin, rwin,
@@ -32,14 +32,14 @@ pub struct HotkeyConfig {
     pub max_duration_secs: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
     /// Substring of the input device name. Empty = system default.
     pub device: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SttConfig {
     /// "whisper" (local whisper.cpp) or "openai".
@@ -52,7 +52,7 @@ pub struct SttConfig {
     pub openai: OpenAiSttConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WhisperConfig {
     /// ggml model name downloaded from Hugging Face on first use:
@@ -64,7 +64,7 @@ pub struct WhisperConfig {
     pub threads: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenAiSttConfig {
     pub api_key: String,
@@ -73,7 +73,7 @@ pub struct OpenAiSttConfig {
     pub model: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FormatConfig {
     /// "none", "claude" or "openai".
@@ -84,7 +84,7 @@ pub struct FormatConfig {
     pub openai: OpenAiLlmConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClaudeConfig {
     pub api_key: String,
@@ -95,7 +95,7 @@ pub struct ClaudeConfig {
     pub effort: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OpenAiLlmConfig {
     pub api_key: String,
@@ -104,7 +104,7 @@ pub struct OpenAiLlmConfig {
     pub model: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PasteConfig {
     /// Put the previous clipboard content back after pasting.
@@ -115,13 +115,13 @@ pub struct PasteConfig {
     pub trailing_space: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoryConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub sounds: bool,
@@ -272,6 +272,18 @@ impl Config {
                 .with_context(|| format!("writing {}", path.display()))?;
             Ok((cfg, true))
         }
+    }
+
+    /// Writes the config back (with the explanatory header) atomically.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let text = toml::to_string_pretty(self)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, format!("{DEFAULT_HEADER}\n{text}")).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {

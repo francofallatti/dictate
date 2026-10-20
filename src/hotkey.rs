@@ -10,7 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_ESCAPE,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
@@ -179,6 +179,19 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     CallNextHookEx(None, code, wparam, lparam)
 }
 
+/// Replaces the chord at runtime (settings changed). Takes effect on the next key event.
+pub fn update_chord(chord: Chord, escape_cancels: bool) -> Result<()> {
+    let state = STATE.get().ok_or_else(|| anyhow!("keyboard hook not installed"))?;
+    let mut s = state.lock().map_err(|_| anyhow!("hook state poisoned"))?;
+    s.chord = chord;
+    s.escape_cancels = escape_cancels;
+    Ok(())
+}
+
+fn physically_down(vk: u32) -> bool {
+    unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
 fn on_key(vk: u32, is_down: bool) {
     let Some(state) = STATE.get() else { return };
     let Ok(mut s) = state.lock() else { return };
@@ -187,6 +200,9 @@ fn on_key(vk: u32, is_down: bool) {
     } else {
         s.down.remove(&vk);
     }
+    // Key-ups can be lost (secure desktop, UAC prompts, remote sessions, sleep). Drop any key
+    // the OS no longer reports as pressed so the chord cannot get stuck "active".
+    s.down.retain(|&k| k == vk && is_down || physically_down(k));
     if s.escape_cancels && is_down && vk == VK_ESCAPE.0 as u32 {
         let _ = s.tx.try_send(HookEvent::Escape);
     }

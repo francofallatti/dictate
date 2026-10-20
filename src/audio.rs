@@ -163,6 +163,12 @@ impl Recorder {
     }
 }
 
+/// Plain device names, for the settings panel.
+pub fn input_device_names() -> Result<Vec<String>> {
+    let host = cpal::default_host();
+    Ok(host.input_devices()?.map(|d| device_name(&d)).collect())
+}
+
 /// Lists input devices for `--list-devices`.
 pub fn list_input_devices() -> Result<Vec<String>> {
     let host = cpal::default_host();

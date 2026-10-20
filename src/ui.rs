@@ -7,7 +7,7 @@ use crossbeam_channel::Sender;
 use std::thread::JoinHandle;
 use tracing::{error, info, warn};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::core::w;
 use windows::Win32::Foundation::{LPARAM, WPARAM};
 use windows::Win32::Media::Audio::{PlaySoundW, SND_ALIAS, SND_ASYNC, SND_NODEFAULT};
@@ -73,6 +73,7 @@ impl AppState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UiEvent {
     Quit,
+    OpenPanel,
     OpenConfig,
     OpenHistory,
 }
@@ -167,28 +168,44 @@ fn message_loop(tray: Option<TrayIcon>, chord_label: &str) {
 fn build_tray(chord_label: &str, ui_tx: Sender<UiEvent>) -> Result<TrayIcon> {
     let menu = Menu::new();
     let title = MenuItem::new(format!("Dictate — mantené {chord_label} para dictar"), false, None);
-    let open_config = MenuItem::new("Abrir configuración", true, None);
-    let open_history = MenuItem::new("Abrir historial", true, None);
+    let open_panel = MenuItem::new("Abrir panel", true, None);
+    let open_config = MenuItem::new("Abrir config.toml", true, None);
+    let open_history = MenuItem::new("Abrir historial (archivo)", true, None);
     let quit = MenuItem::new("Salir", true, None);
     menu.append(&title)?;
     menu.append(&PredefinedMenuItem::separator())?;
+    menu.append(&open_panel)?;
     menu.append(&open_config)?;
     menu.append(&open_history)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&quit)?;
 
-    let ids = (open_config.id().clone(), open_history.id().clone(), quit.id().clone());
+    let ids = (open_panel.id().clone(), open_config.id().clone(), open_history.id().clone(), quit.id().clone());
+    let menu_tx = ui_tx.clone();
     MenuEvent::set_event_handler(Some(move |ev: MenuEvent| {
         let event = if ev.id == ids.0 {
-            UiEvent::OpenConfig
+            UiEvent::OpenPanel
         } else if ev.id == ids.1 {
-            UiEvent::OpenHistory
+            UiEvent::OpenConfig
         } else if ev.id == ids.2 {
+            UiEvent::OpenHistory
+        } else if ev.id == ids.3 {
             UiEvent::Quit
         } else {
             return;
         };
-        let _ = ui_tx.send(event);
+        let _ = menu_tx.send(event);
+    }));
+    // Left click (or double click) on the icon opens the panel, like Wispr's hub.
+    TrayIconEvent::set_event_handler(Some(move |ev: TrayIconEvent| {
+        let open = match ev {
+            TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => true,
+            TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => true,
+            _ => false,
+        };
+        if open {
+            let _ = ui_tx.send(UiEvent::OpenPanel);
+        }
     }));
 
     let tray = TrayIconBuilder::new()

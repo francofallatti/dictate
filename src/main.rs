@@ -2,7 +2,8 @@
 //!
 //! Hold the chord (default Ctrl+Win) → speak → release. The audio is transcribed
 //! (whisper.cpp locally or OpenAI), optionally cleaned up by an LLM, and pasted into the
-//! focused application.
+//! focused application. A hub window (history, settings, diagnostics) runs on the main thread;
+//! the dictation orchestrator runs on its own thread.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -13,6 +14,7 @@ mod gesture;
 mod history;
 mod hotkey;
 mod inject;
+mod panel;
 mod stt;
 mod ui;
 
@@ -22,6 +24,7 @@ use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use format::{FormatContext, Formatter};
 use gesture::{Action, Gesture, Input};
 use hotkey::{Chord, HookEvent};
+use panel::{PanelCommand, PanelLink, Shared, SharedState};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use stt::{Hint, Transcriber};
@@ -73,10 +76,13 @@ fn run() -> Result<()> {
             let paste = args.iter().any(|a| a == "--paste");
             transcribe_file(&cfg, &paths, std::path::Path::new(file), paste)
         }
-        Some(other) if other.starts_with("--") && other != "--verbose" => {
+        Some(other) if other.starts_with("--") && !matches!(other, "--verbose" | "--panel") => {
             anyhow::bail!("unknown option {other}; try --help")
         }
-        _ => run_app(cfg, paths),
+        _ => {
+            let show_panel = created || args.iter().any(|a| a == "--panel");
+            run_app(cfg, paths, show_panel)
+        }
     }
 }
 
@@ -84,6 +90,7 @@ fn print_help(paths: &Paths) {
     println!(
         "Dictate — push-to-talk dictation\n\n\
 USAGE:\n  dictate                    run in the tray (hold the chord to dictate)\n  \
+dictate --panel            same, and open the hub window right away\n  \
 dictate --transcribe F.wav [--paste]   transcribe a WAV file and print (or paste) the result\n  \
 dictate --paste-text TEXT  paste TEXT into the focused app (tests the injection path)\n  \
 dictate --list-devices     list microphones\n  dictate --config           print the config path\n  \
@@ -139,30 +146,44 @@ struct JobDone {
     summary: String,
 }
 
+/// Everything a dictation job needs; rebuilt when settings change.
 struct Pipeline {
     cfg: Arc<Config>,
     paths: Arc<Paths>,
     transcriber: Arc<dyn Transcriber>,
     formatter: Arc<dyn Formatter>,
+    shared: SharedState,
+    link: PanelLink,
 }
 
 impl Pipeline {
+    fn note(&self, line: impl AsRef<str>) {
+        self.shared.lock().unwrap().event(line);
+        self.link.repaint();
+    }
+
     fn run(&self, pcm: Vec<f32>, app: inject::ForegroundApp) -> JobDone {
         let audio_secs = pcm.len() as f32 / audio::TARGET_RATE as f32;
         let hint = Hint { language: self.cfg.stt.language.clone(), initial_prompt: self.cfg.stt.initial_prompt.clone() };
+        self.note(format!("transcribiendo {audio_secs:.1}s con {}", self.transcriber.name()));
         let t0 = Instant::now();
         let raw = match self.transcriber.transcribe(&pcm, &hint) {
             Ok(t) => t,
             Err(e) => {
                 error!(error = %format!("{e:#}"), "transcription failed");
-                return JobDone { ok: false, summary: format!("transcription failed: {e}") };
+                let msg = format!("transcripción falló: {e:#}");
+                self.shared.lock().unwrap().last_error = Some(msg.clone());
+                self.note(&msg);
+                return JobDone { ok: false, summary: msg };
             }
         };
         let stt_ms = t0.elapsed().as_millis() as u64;
         if raw.trim().is_empty() {
             info!(audio_secs, "nothing recognised");
+            self.note(format!("sin palabras reconocidas ({stt_ms} ms)"));
             return JobDone { ok: true, summary: "nothing recognised".into() };
         }
+        self.note(format!("texto ({stt_ms} ms): {}", preview(&raw)));
 
         let ctx = FormatContext { app_name: app.process.clone(), window_title: app.title.clone(), language: self.cfg.stt.language.clone() };
         let t1 = Instant::now();
@@ -170,6 +191,7 @@ impl Pipeline {
             Ok(t) => t,
             Err(e) => {
                 warn!(error = %format!("{e:#}"), "formatting failed; pasting raw transcript");
+                self.note(format!("formateo falló, se pega el texto crudo: {e}"));
                 raw.clone()
             }
         };
@@ -180,9 +202,15 @@ impl Pipeline {
             to_paste.push(' ');
         }
         let pasted = match inject::paste_text(&to_paste, &self.cfg.paste) {
-            Ok(()) => true,
+            Ok(()) => {
+                self.note(format!("pegado en {}", if app.process.is_empty() { "app desconocida" } else { &app.process }));
+                true
+            }
             Err(e) => {
                 error!(error = %format!("{e:#}"), "paste failed");
+                let msg = format!("pegado falló: {e:#}");
+                self.shared.lock().unwrap().last_error = Some(msg.clone());
+                self.note(&msg);
                 false
             }
         };
@@ -203,23 +231,97 @@ impl Pipeline {
             };
             if let Err(e) = history::append(&self.paths.history_file, &entry) {
                 warn!(error = %e, "could not write history");
+                self.note(format!("no se pudo escribir el historial: {e}"));
             }
+        }
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.history_dirty = true;
+            s.last_result = Some(final_text.clone());
         }
         info!(audio_secs, stt_ms, format_ms, pasted, app = %app.process, "dictation complete");
         JobDone { ok: pasted, summary: final_text }
     }
 }
 
-fn run_app(cfg: Config, paths: Paths) -> Result<()> {
-    let cfg = Arc::new(cfg);
-    let paths = Arc::new(paths);
+fn preview(s: &str) -> String {
+    let t: String = s.chars().take(70).collect();
+    if s.chars().count() > 70 { format!("{t}…") } else { t }
+}
+
+/// Builds the speech + formatting backends and warms them up on a helper thread.
+fn build_pipeline(cfg: &Arc<Config>, paths: &Arc<Paths>, shared: &SharedState, link: &PanelLink, warm_tx: &Sender<Result<()>>) -> Result<Arc<Pipeline>> {
+    let transcriber = stt::build(cfg, paths)?;
+    let formatter = format::build(cfg)?;
+    let pipeline = Arc::new(Pipeline {
+        cfg: Arc::clone(cfg),
+        paths: Arc::clone(paths),
+        transcriber: Arc::clone(&transcriber),
+        formatter,
+        shared: Arc::clone(shared),
+        link: link.clone(),
+    });
+    let tx = warm_tx.clone();
+    std::thread::Builder::new()
+        .name("dictate-warmup".into())
+        .spawn(move || {
+            let _ = tx.send(transcriber.warm_up());
+        })?;
+    Ok(pipeline)
+}
+
+fn run_app(cfg: Config, paths: Paths, show_panel: bool) -> Result<()> {
     let chord = Chord::parse(&cfg.hotkey.chord)?;
     let chord_label = chord.describe();
-    info!(chord = %chord_label, stt = %cfg.stt.backend, format = %cfg.format.backend, "starting Dictate");
+    let paths = Arc::new(paths);
+    let shared: SharedState = Arc::new(std::sync::Mutex::new(Shared::new(cfg.clone(), chord_label.clone())));
+    let link = PanelLink::default();
+    let (cmd_tx, cmd_rx) = unbounded::<PanelCommand>();
 
-    let transcriber = stt::build(&cfg, &paths)?;
-    let formatter = format::build(&cfg)?;
-    let pipeline = Arc::new(Pipeline { cfg: Arc::clone(&cfg), paths: Arc::clone(&paths), transcriber: Arc::clone(&transcriber), formatter });
+    // The orchestrator owns the hook/tray thread, the recorder and the gesture state machine.
+    let core = {
+        let shared = Arc::clone(&shared);
+        let link = link.clone();
+        let paths = Arc::clone(&paths);
+        std::thread::Builder::new()
+            .name("dictate-core".into())
+            .spawn(move || {
+                if let Err(e) = orchestrate(cfg, paths, chord, chord_label, shared.clone(), link.clone(), cmd_rx) {
+                    error!("{e:#}");
+                    shared.lock().unwrap().event(format!("error fatal: {e:#}"));
+                    eprintln!("dictate: {e:#}");
+                }
+                // Whatever the reason, when the core stops the process must stop too.
+                shared.lock().unwrap().quitting = true;
+                link.close();
+                std::thread::sleep(Duration::from_millis(500));
+                std::process::exit(0);
+            })?
+    };
+
+    // eframe must run on the main thread. It returns only on a real quit.
+    if let Err(e) = panel::run(Arc::clone(&shared), paths, cmd_tx, link, show_panel) {
+        error!(error = %e, "panel failed");
+    }
+    drop(core);
+    std::process::exit(0);
+}
+
+fn orchestrate(
+    cfg: Config,
+    paths: Arc<Paths>,
+    chord: Chord,
+    chord_label: String,
+    shared: SharedState,
+    link: PanelLink,
+    cmd_rx: Receiver<PanelCommand>,
+) -> Result<()> {
+    let mut cfg = Arc::new(cfg);
+    info!(chord = %chord_label, stt = %cfg.stt.backend, format = %cfg.format.backend, "starting Dictate");
+    let note = |s: &str| {
+        shared.lock().unwrap().event(s);
+        link.repaint();
+    };
 
     let (hook_tx, hook_rx) = unbounded::<HookEvent>();
     let (ui_tx, ui_rx) = unbounded::<UiEvent>();
@@ -232,19 +334,14 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
         ui_tx,
     )?;
     ui.set_state(AppState::Loading);
+    note(&format!("iniciado · atajo {chord_label}"));
 
-    // Model download / load happens off the main loop so the tray appears immediately.
-    {
-        let t = Arc::clone(&transcriber);
-        std::thread::Builder::new()
-            .name("dictate-warmup".into())
-            .spawn(move || {
-                let _ = warm_tx.send(t.warm_up());
-            })?;
-    }
+    let mut pipeline = build_pipeline(&cfg, &paths, &shared, &link, &warm_tx)?;
+    note(&format!("cargando motor {}", cfg.stt.backend));
 
     let mut recorder = audio::Recorder::new(&cfg.audio.device)?;
     info!(device = %recorder.device_name(), "microphone selected");
+    shared.lock().unwrap().mic_name = recorder.device_name();
 
     let mut gesture = Gesture::new(
         Duration::from_millis(cfg.hotkey.double_tap_ms),
@@ -253,7 +350,13 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
     let mut ready = false;
     let mut jobs_in_flight: usize = 0;
     let mut current_app = inject::ForegroundApp::default();
-    let sounds = cfg.ui.sounds;
+    let mut sounds = cfg.ui.sounds;
+
+    let set_state = |state: AppState| {
+        ui.set_state(state);
+        shared.lock().unwrap().state = state;
+        link.repaint();
+    };
 
     loop {
         let timeout = gesture
@@ -271,15 +374,90 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
             recv(ui_rx) -> ev => {
                 match ev {
                     Ok(UiEvent::Quit) | Err(_) => break,
-                    Ok(UiEvent::OpenConfig) => open_path(&paths.config_file),
-                    Ok(UiEvent::OpenHistory) => open_path(&paths.history_file),
+                    Ok(UiEvent::OpenPanel) => link.show(),
+                    Ok(UiEvent::OpenConfig) => panel::open_path(&paths.config_file),
+                    Ok(UiEvent::OpenHistory) => panel::open_path(&paths.history_file),
+                }
+                None
+            },
+            recv(cmd_rx) -> cmd => {
+                match cmd {
+                    Ok(PanelCommand::Quit) | Err(_) => break,
+                    Ok(PanelCommand::ReloadBackend) => {
+                        ready = false;
+                        set_state(AppState::Loading);
+                        match build_pipeline(&cfg, &paths, &shared, &link, &warm_tx) {
+                            Ok(p) => { pipeline = p; note("recargando motor"); }
+                            Err(e) => { note(&format!("no se pudo recargar el motor: {e:#}")); set_state(AppState::Error); }
+                        }
+                    }
+                    Ok(PanelCommand::ApplyConfig(new_cfg)) => {
+                        note("aplicando configuración nueva");
+                        let old = Arc::clone(&cfg);
+                        cfg = Arc::new(new_cfg);
+                        sounds = cfg.ui.sounds;
+                        gesture = Gesture::new(
+                            Duration::from_millis(cfg.hotkey.double_tap_ms),
+                            Duration::from_secs(cfg.hotkey.max_duration_secs.max(5)),
+                        );
+                        match Chord::parse(&cfg.hotkey.chord) {
+                            Ok(c) => {
+                                let label = c.describe();
+                                if let Err(e) = hotkey::update_chord(c, cfg.hotkey.escape_cancels) {
+                                    note(&format!("no se pudo cambiar el atajo: {e}"));
+                                } else {
+                                    shared.lock().unwrap().chord_label = label.clone();
+                                    note(&format!("atajo ahora: {label}"));
+                                }
+                            }
+                            Err(e) => note(&format!("atajo inválido, se mantiene el anterior: {e}")),
+                        }
+                        if cfg.audio.device != old.audio.device && !gesture.is_recording() {
+                            match audio::Recorder::new(&cfg.audio.device) {
+                                Ok(r) => { recorder = r; shared.lock().unwrap().mic_name = recorder.device_name(); note(&format!("micrófono: {}", recorder.device_name())); }
+                                Err(e) => note(&format!("no se pudo abrir el micrófono: {e:#}")),
+                            }
+                        }
+                        let backend_changed = cfg.stt != old.stt || cfg.format != old.format;
+                        if backend_changed {
+                            ready = false;
+                            set_state(AppState::Loading);
+                            match build_pipeline(&cfg, &paths, &shared, &link, &warm_tx) {
+                                Ok(p) => pipeline = p,
+                                Err(e) => { note(&format!("configuración de motor inválida: {e:#}")); shared.lock().unwrap().backend_error = Some(format!("{e:#}")); set_state(AppState::Error); }
+                            }
+                        } else {
+                            // Only paste/history/ui settings changed: rebuild the pipeline with the new config,
+                            // keeping the already-loaded backends.
+                            pipeline = Arc::new(Pipeline {
+                                cfg: Arc::clone(&cfg),
+                                paths: Arc::clone(&paths),
+                                transcriber: Arc::clone(&pipeline.transcriber),
+                                formatter: Arc::clone(&pipeline.formatter),
+                                shared: Arc::clone(&shared),
+                                link: link.clone(),
+                            });
+                        }
+                    }
                 }
                 None
             },
             recv(warm_rx) -> r => {
                 match r {
-                    Ok(Ok(())) => { ready = true; info!("backend ready"); if !gesture.is_recording() { ui.set_state(AppState::Idle); } }
-                    Ok(Err(e)) => { error!(error = %format!("{e:#}"), "backend warm-up failed"); ui.set_state(AppState::Error); if sounds { ui::play(Sound::Error); } }
+                    Ok(Ok(())) => {
+                        ready = true;
+                        info!("backend ready");
+                        { let mut s = shared.lock().unwrap(); s.backend_ready = true; s.backend_error = None; }
+                        note("motor listo");
+                        if !gesture.is_recording() { set_state(AppState::Idle); }
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %format!("{e:#}"), "backend warm-up failed");
+                        { let mut s = shared.lock().unwrap(); s.backend_ready = false; s.backend_error = Some(format!("{e:#}")); }
+                        note(&format!("el motor no pudo cargar: {e:#}"));
+                        set_state(AppState::Error);
+                        if sounds { ui::play(Sound::Error); }
+                    }
                     Err(_) => {}
                 }
                 None
@@ -288,10 +466,11 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
                 jobs_in_flight = jobs_in_flight.saturating_sub(1);
                 if let Ok(d) = r {
                     if !d.ok { if sounds { ui::play(Sound::Error); } }
-                    info!(summary = %d.summary.chars().take(80).collect::<String>(), "job finished");
+                    info!(summary = %preview(&d.summary), "job finished");
                 }
+                shared.lock().unwrap().jobs_in_flight = jobs_in_flight;
                 if !gesture.is_recording() {
-                    ui.set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
+                    set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
                 }
                 None
             },
@@ -305,26 +484,31 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
             Action::Start => {
                 if !ready {
                     warn!("chord pressed before the speech backend finished loading");
+                    note("atajo presionado pero el motor todavía no está listo");
                     if sounds { ui::play(Sound::Error); }
                     continue;
                 }
                 current_app = inject::foreground_app();
                 match recorder.start() {
                     Ok(()) => {
-                        ui.set_state(AppState::Listening);
+                        set_state(AppState::Listening);
                         if sounds { ui::play(Sound::Start); }
                         info!(app = %current_app.process, title = %current_app.title, "recording started");
+                        note(&format!("grabando · app: {}", if current_app.process.is_empty() { "?" } else { &current_app.process }));
                     }
                     Err(e) => {
                         error!(error = %format!("{e:#}"), "could not start recording");
-                        ui.set_state(AppState::Error);
+                        shared.lock().unwrap().last_error = Some(format!("micrófono: {e:#}"));
+                        note(&format!("no se pudo grabar: {e:#}"));
+                        set_state(AppState::Error);
                         if sounds { ui::play(Sound::Error); }
                     }
                 }
             }
             Action::Locked => {
-                ui.set_state(AppState::Locked);
+                set_state(AppState::Locked);
                 info!("hands-free mode");
+                note("manos libres activado");
             }
             Action::Stop => {
                 let pcm = recorder.stop();
@@ -333,25 +517,30 @@ fn run_app(cfg: Config, paths: Paths) -> Result<()> {
                 info!(secs, level_dbfs = level, "recording stopped");
                 if secs < 0.4 || level < -70.0 {
                     info!("recording too short or silent; discarded");
+                    note(&format!("grabación descartada ({secs:.1}s, {level:.0} dBFS)"));
                     if sounds { ui::play(Sound::Cancel); }
-                    ui.set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
+                    set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
                     continue;
                 }
+                note(&format!("grabación de {secs:.1}s ({level:.0} dBFS), procesando"));
                 if sounds { ui::play(Sound::Stop); }
-                ui.set_state(AppState::Processing);
+                set_state(AppState::Processing);
                 jobs_in_flight += 1;
+                shared.lock().unwrap().jobs_in_flight = jobs_in_flight;
                 spawn_job(Arc::clone(&pipeline), pcm, current_app.clone(), done_tx.clone());
             }
             Action::Cancel => {
                 let _ = recorder.stop();
                 info!("recording cancelled");
+                note("grabación cancelada");
                 if sounds { ui::play(Sound::Cancel); }
-                ui.set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
+                set_state(if jobs_in_flight > 0 { AppState::Processing } else { AppState::Idle });
             }
         }
     }
 
     info!("shutting down");
+    note("cerrando");
     if recorder.is_recording() {
         let _ = recorder.stop();
     }
@@ -368,17 +557,3 @@ fn spawn_job(pipeline: Arc<Pipeline>, pcm: Vec<f32>, app: inject::ForegroundApp,
         error!(error = %e, "could not spawn job thread");
     }
 }
-
-fn open_path(path: &std::path::Path) {
-    if !path.exists() {
-        if let Err(e) = std::fs::write(path, "") {
-            warn!(error = %e, "cannot create {}", path.display());
-        }
-    }
-    if let Err(e) = std::process::Command::new("cmd").args(["/C", "start", "", &path.to_string_lossy()]).spawn() {
-        warn!(error = %e, "cannot open {}", path.display());
-    }
-}
-
-#[allow(dead_code)]
-fn _assert_send(_: &Receiver<JobDone>) {}
