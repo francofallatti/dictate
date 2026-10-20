@@ -1,0 +1,7 @@
+# whisper.cpp (whisper-rs-sys) is built with CMake + MSVC. The pregenerated bindings
+# avoid the libclang/bindgen requirement.
+[env]
+WHISPER_DONT_GENERATE_BINDINGS = "1"
+# winget installs CMake as a portable package that is not on PATH in every shell.
+# Remove this line if `cmake` is already on your PATH.
+CMAKE = 'C:\Users\franco.fallati\AppData\Local\Microsoft\WinGet\Packages\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.4-windows-x86_64\bin\cmake.exe'

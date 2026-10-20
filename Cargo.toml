@@ -1,0 +1,49 @@
+[package]
+name = "dictate"
+version = "0.1.0"
+edition = "2021"
+description = "Push-to-talk voice dictation for Windows (whisper.cpp local or OpenAI, optional LLM clean-up)"
+license = "MIT"
+
+[features]
+default = ["whisper"]
+whisper = ["dep:whisper-rs"]
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+directories = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+crossbeam-channel = "0.5"
+cpal = "0.18"
+hound = "3.5"
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "native-tls", "blocking"] }
+arboard = "3"
+tray-icon = "0.26"
+whisper-rs = { version = "0.16", optional = true, features = ["tracing_backend"] }
+chrono = { version = "0.4", features = ["clock"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_Media_Audio",
+] }
+
+# whisper-rs-sys ships Linux-generated bindings whose glibc layout asserts fail on MSVC;
+# the vendored copy strips them at build time (see vendor/README.md).
+[patch.crates-io]
+whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
