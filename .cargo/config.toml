@@ -2,6 +2,13 @@
 # avoid the libclang/bindgen requirement.
 [env]
 WHISPER_DONT_GENERATE_BINDINGS = "1"
+# The cmake crate replaces CMake's per-configuration flags with its own (no /O2), so
+# whisper.cpp/ggml ended up compiled with MSVC's default /Od in BOTH profiles. Restore
+# optimisation explicitly (whisper-rs-sys forwards every CMAKE_* variable to CMake).
+CMAKE_C_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "/MD /O2 /Ob2 /DNDEBUG"
+CMAKE_C_FLAGS_RELWITHDEBINFO = "/MD /Zi /O2 /Ob2 /DNDEBUG"
+CMAKE_CXX_FLAGS_RELWITHDEBINFO = "/MD /Zi /O2 /Ob2 /DNDEBUG"
 # winget installs CMake as a portable package that is not on PATH in every shell.
 # Remove this line if `cmake` is already on your PATH.
 CMAKE = 'C:\Users\franco.fallati\AppData\Local\Microsoft\WinGet\Packages\Kitware.CMake_Microsoft.Winget.Source_8wekyb3d8bbwe\cmake-4.4.4-windows-x86_64\bin\cmake.exe'

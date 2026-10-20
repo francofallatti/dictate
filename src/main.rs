@@ -15,6 +15,7 @@ mod history;
 mod hotkey;
 mod inject;
 mod panel;
+mod perf;
 mod stt;
 mod ui;
 
@@ -50,6 +51,7 @@ fn run() -> Result<()> {
     }
 
     let _log_guard = init_logging(&paths, args.iter().any(|a| a == "--verbose"))?;
+    perf::opt_out_of_power_throttling();
     let (cfg, created) = Config::load_or_create(&paths.config_file)?;
     cfg.validate()?;
     if created {
@@ -339,7 +341,7 @@ fn orchestrate(
     let mut pipeline = build_pipeline(&cfg, &paths, &shared, &link, &warm_tx)?;
     note(&format!("cargando motor {}", cfg.stt.backend));
 
-    let mut recorder = audio::Recorder::new(&cfg.audio.device)?;
+    let mut recorder = audio::Recorder::new(&cfg.audio.device, cfg.audio.always_on, cfg.audio.preroll_ms)?;
     info!(device = %recorder.device_name(), "microphone selected");
     shared.lock().unwrap().mic_name = recorder.device_name();
 
@@ -412,8 +414,8 @@ fn orchestrate(
                             }
                             Err(e) => note(&format!("atajo inválido, se mantiene el anterior: {e}")),
                         }
-                        if cfg.audio.device != old.audio.device && !gesture.is_recording() {
-                            match audio::Recorder::new(&cfg.audio.device) {
+                        if cfg.audio != old.audio && !gesture.is_recording() {
+                            match audio::Recorder::new(&cfg.audio.device, cfg.audio.always_on, cfg.audio.preroll_ms) {
                                 Ok(r) => { recorder = r; shared.lock().unwrap().mic_name = recorder.device_name(); note(&format!("micrófono: {}", recorder.device_name())); }
                                 Err(e) => note(&format!("no se pudo abrir el micrófono: {e:#}")),
                             }
@@ -550,6 +552,8 @@ fn orchestrate(
 
 fn spawn_job(pipeline: Arc<Pipeline>, pcm: Vec<f32>, app: inject::ForegroundApp, done: Sender<JobDone>) {
     let r = std::thread::Builder::new().name("dictate-job".into()).spawn(move || {
+        // Transcription is latency-critical for the user; don't let background work starve it.
+        perf::boost_current_thread();
         let result = pipeline.run(pcm, app);
         let _ = done.send(result);
     });

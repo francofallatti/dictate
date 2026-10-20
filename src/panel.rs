@@ -568,6 +568,12 @@ impl PanelApp {
                             }
                         });
                     });
+                    row(ui, "Micrófono siempre activo", "arranque instantáneo y sin perder la primera sílaba", |ui| {
+                        ui.checkbox(&mut self.draft.audio.always_on, "");
+                    });
+                    row(ui, "Pre-roll", "audio previo al atajo que se agrega al dictado", |ui| {
+                        ui.add_enabled(self.draft.audio.always_on, egui::DragValue::new(&mut self.draft.audio.preroll_ms).range(0..=1000).suffix(" ms"));
+                    });
                     row(ui, "Idioma", "auto detecta; fijarlo mejora la precisión", |ui| {
                         egui::ComboBox::from_id_salt("lang").selected_text(lang_name(&self.draft.stt.language)).width(200.0).show_ui(ui, |ui| {
                             for (code, name) in LANGS {
@@ -600,6 +606,9 @@ impl PanelApp {
                         });
                         row(ui, "Hilos", "0 = automático", |ui| {
                             ui.add(egui::DragValue::new(&mut self.draft.stt.whisper.threads).range(0..=32));
+                        });
+                        row(ui, "Modo rápido para clips cortos", "reduce el contexto de audio en dictados breves (mucho más rápido)", |ui| {
+                            ui.checkbox(&mut self.draft.stt.whisper.fast_short_audio, "");
                         });
                     } else {
                         row(ui, "Modelo OpenAI", "", |ui| {

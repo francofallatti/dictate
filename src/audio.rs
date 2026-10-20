@@ -1,10 +1,17 @@
 //! Microphone capture with cpal, converted on the fly to 16 kHz mono f32 (what whisper expects).
+//!
+//! The input stream stays open all the time ("always on"): opening a WASAPI stream takes
+//! 100–300 ms and the first callbacks underrun, which used to swallow the first syllable of
+//! every dictation. While idle the stream only feeds a short ring buffer; when a dictation
+//! starts, the last `preroll_ms` of that ring are prepended to the recording.
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Sample, SampleFormat, SizedSample, Stream, SupportedStreamConfig};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub const TARGET_RATE: u32 = 16_000;
 
@@ -36,7 +43,6 @@ impl Downsampler {
             out.extend_from_slice(input);
             return;
         }
-        // Box average groups of `box_len` input samples (anti-aliasing), then interpolate.
         for &s in input {
             self.box_buf.push(s);
             if self.box_buf.len() < self.box_len {
@@ -49,7 +55,6 @@ impl Downsampler {
     }
 
     fn push_filtered(&mut self, s: f32, out: &mut Vec<f32>) {
-        // The filtered stream runs at in_rate / box_len; interpolate to the output rate.
         let eff_ratio = self.ratio / self.box_len as f64;
         if !self.have_prev {
             self.prev = s;
@@ -57,7 +62,6 @@ impl Downsampler {
             self.pos = 0.0;
             return;
         }
-        // Output samples fall at positions pos, pos+eff_ratio, ... within [prev, s].
         while self.pos < 1.0 {
             let v = self.prev as f64 + (s as f64 - self.prev as f64) * self.pos;
             out.push(v as f32);
@@ -68,15 +72,41 @@ impl Downsampler {
     }
 }
 
+/// State shared with the audio callback.
+struct Capture {
+    recording: bool,
+    buffer: Vec<f32>,
+    ring: VecDeque<f32>,
+    ring_capacity: usize,
+}
+
+impl Capture {
+    fn push(&mut self, samples: &[f32]) {
+        if self.recording {
+            self.buffer.extend_from_slice(samples);
+        } else {
+            for &s in samples {
+                if self.ring.len() == self.ring_capacity {
+                    self.ring.pop_front();
+                }
+                self.ring.push_back(s);
+            }
+        }
+    }
+}
+
 pub struct Recorder {
     device: cpal::Device,
     config: SupportedStreamConfig,
     stream: Option<Stream>,
-    buffer: Arc<Mutex<Vec<f32>>>,
+    capture: Arc<Mutex<Capture>>,
+    errors: Arc<AtomicU32>,
+    always_on: bool,
+    preroll_samples: usize,
 }
 
 impl Recorder {
-    pub fn new(device_filter: &str) -> Result<Self> {
+    pub fn new(device_filter: &str, always_on: bool, preroll_ms: u64) -> Result<Self> {
         let host = cpal::default_host();
         let device = if device_filter.trim().is_empty() {
             host.default_input_device().ok_or_else(|| anyhow!("no default input device"))?
@@ -92,9 +122,22 @@ impl Recorder {
             rate = config.sample_rate(),
             channels = config.channels(),
             format = ?config.sample_format(),
+            always_on,
+            preroll_ms,
             "input device ready"
         );
-        Ok(Self { device, config, stream: None, buffer: Arc::new(Mutex::new(Vec::new())) })
+        let preroll_samples = (TARGET_RATE as u64 * preroll_ms / 1000) as usize;
+        let capture = Arc::new(Mutex::new(Capture {
+            recording: false,
+            buffer: Vec::new(),
+            ring: VecDeque::with_capacity(preroll_samples + 1),
+            ring_capacity: preroll_samples.max(1),
+        }));
+        let mut rec = Self { device, config, stream: None, capture, errors: Arc::new(AtomicU32::new(0)), always_on, preroll_samples };
+        if always_on {
+            rec.open_stream()?;
+        }
+        Ok(rec)
     }
 
     pub fn device_name(&self) -> String {
@@ -102,14 +145,54 @@ impl Recorder {
     }
 
     pub fn is_recording(&self) -> bool {
-        self.stream.is_some()
+        self.capture.lock().unwrap().recording
     }
 
+    /// Starts a dictation: prepends the pre-roll and begins buffering.
     pub fn start(&mut self) -> Result<()> {
-        if self.stream.is_some() {
+        if self.stream.is_none() {
+            self.open_stream()?;
+        }
+        let mut c = self.capture.lock().unwrap();
+        if c.recording {
             return Ok(());
         }
-        self.buffer.lock().unwrap().clear();
+        c.buffer.clear();
+        if self.preroll_samples > 0 && !c.ring.is_empty() {
+            let (a, b) = c.ring.as_slices();
+            let mut pre = Vec::with_capacity(a.len() + b.len());
+            pre.extend_from_slice(a);
+            pre.extend_from_slice(b);
+            c.buffer.extend_from_slice(&pre);
+            debug!(preroll_ms = pre.len() * 1000 / TARGET_RATE as usize, "pre-roll attached");
+        }
+        c.ring.clear();
+        c.recording = true;
+        Ok(())
+    }
+
+    /// Stops a dictation and returns the 16 kHz mono recording.
+    pub fn stop(&mut self) -> Vec<f32> {
+        let pcm = {
+            let mut c = self.capture.lock().unwrap();
+            c.recording = false;
+            std::mem::take(&mut c.buffer)
+        };
+        if !self.always_on {
+            if let Some(stream) = self.stream.take() {
+                let _ = stream.pause();
+                drop(stream);
+            }
+        }
+        pcm
+    }
+
+    /// Number of stream errors reported by the driver since start (underruns are benign).
+    pub fn error_count(&self) -> u32 {
+        self.errors.load(Ordering::Relaxed)
+    }
+
+    fn open_stream(&mut self) -> Result<()> {
         let stream = match self.config.sample_format() {
             SampleFormat::F32 => self.build::<f32>()?,
             SampleFormat::I16 => self.build::<i16>()?,
@@ -123,15 +206,6 @@ impl Recorder {
         Ok(())
     }
 
-    /// Stops capture and returns the 16 kHz mono recording.
-    pub fn stop(&mut self) -> Vec<f32> {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.pause();
-            drop(stream);
-        }
-        std::mem::take(&mut *self.buffer.lock().unwrap())
-    }
-
     fn build<T>(&self) -> Result<Stream>
     where
         T: SizedSample,
@@ -139,7 +213,8 @@ impl Recorder {
     {
         let channels = self.config.channels() as usize;
         let mut down = Downsampler::new(self.config.sample_rate(), TARGET_RATE);
-        let buffer = Arc::clone(&self.buffer);
+        let capture = Arc::clone(&self.capture);
+        let errors = Arc::clone(&self.errors);
         let mut mono: Vec<f32> = Vec::new();
         let mut converted: Vec<f32> = Vec::new();
         let stream = self.device.build_input_stream(
@@ -152,11 +227,20 @@ impl Recorder {
                 }
                 converted.clear();
                 down.process(&mono, &mut converted);
-                if let Ok(mut b) = buffer.lock() {
-                    b.extend_from_slice(&converted);
+                if let Ok(mut c) = capture.lock() {
+                    c.push(&converted);
                 }
             },
-            |err| warn!(error = %err, "input stream error"),
+            move |err| {
+                // The first callback after a stream opens typically reports an underrun; that
+                // is expected. Repeated errors would point at a device problem.
+                let n = errors.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= 2 {
+                    debug!(error = %err, "input stream notice");
+                } else {
+                    warn!(error = %err, count = n, "input stream error");
+                }
+            },
             None,
         )?;
         Ok(stream)
@@ -221,5 +305,16 @@ mod tests {
         let mut out = Vec::new();
         d.process(&input, &mut out);
         assert!((out.len() as i64 - 16_000).abs() < 8, "got {}", out.len());
+    }
+
+    #[test]
+    fn ring_keeps_only_preroll_and_recording_appends() {
+        let mut c = Capture { recording: false, buffer: Vec::new(), ring: VecDeque::new(), ring_capacity: 4 };
+        c.push(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(c.ring.iter().copied().collect::<Vec<_>>(), vec![3.0, 4.0, 5.0, 6.0]);
+        c.recording = true;
+        c.push(&[7.0, 8.0]);
+        assert_eq!(c.buffer, vec![7.0, 8.0]);
+        assert_eq!(c.ring.len(), 4);
     }
 }

@@ -111,6 +111,24 @@ restore_delay_ms = 250
 trailing_space = true
 ```
 
+## Performance notes
+
+- **whisper.cpp must be built optimised.** The `cmake` crate replaces CMake's per-configuration
+  compiler flags with its own, which on MSVC drops `/O2`; ggml then runs at `/Od` and a 7 s clip
+  takes ~35 s instead of ~5 s. `.cargo/config.toml` restores the flags through the
+  `CMAKE_C_FLAGS_RELEASE` / `..._RELWITHDEBINFO` variables that `whisper-rs-sys` forwards to
+  CMake. If you ever see transcription times of tens of seconds, check
+  `target/<profile>/build/whisper-rs-sys-*/out/build/ggml/src/ggml-cpu.vcxproj` for
+  `<Optimization>MaxSpeed</Optimization>` in the active configuration.
+- **Threads default to 4** (`stt.whisper.threads = 0`). ggml synchronises workers with barriers,
+  so more threads than free performance cores makes things slower, not faster; on this
+  Core Ultra laptop 12 threads took 40 s while 4 took 5 s under load.
+- **Power throttling is disabled for the process** (`src/perf.rs`). Tray apps count as
+  background work and get EcoQoS under the "Better battery" power mode, which parks them on
+  efficiency cores. Expect transcription to still be ~2x slower on battery-saver modes.
+- **Microphone stays open** (`audio.always_on`), with `preroll_ms` of audio prepended, so the
+  first syllable is not lost to the stream start-up underrun.
+
 ## Architecture
 
 ```

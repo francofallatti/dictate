@@ -44,6 +44,13 @@ windows = { version = "0.62", features = [
 [patch.crates-io]
 whisper-rs-sys = { path = "vendor/whisper-rs-sys" }
 
+# whisper.cpp is compiled by CMake with the profile derived from cargo's opt-level; an
+# unoptimised whisper.cpp is several times slower, which makes debug builds misleading.
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3
+[profile.dev.package.whisper-rs]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"

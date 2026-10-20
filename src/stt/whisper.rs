@@ -19,7 +19,16 @@ pub struct WhisperTranscriber {
     model_path: PathBuf,
     model_url: Option<String>,
     threads: i32,
+    fast_short_audio: bool,
     ctx: Mutex<Option<Arc<WhisperContext>>>,
+}
+
+/// whisper's encoder always sees a 30 s window (1500 audio-context frames). For a 4 s dictation
+/// that is mostly padding; limiting the context to what the clip needs cuts encoder time by a
+/// large factor. Keep a generous margin and never go below 512 frames (~10 s).
+fn audio_ctx_for(secs: f32) -> i32 {
+    let needed = ((secs + 4.0) / 30.0 * 1500.0).ceil() as i32;
+    needed.clamp(512, 1500)
 }
 
 impl WhisperTranscriber {
@@ -34,12 +43,15 @@ impl WhisperTranscriber {
             let file = format!("ggml-{name}.bin");
             (paths.models_dir.join(&file), Some(format!("{HF_BASE}/{file}")))
         };
+        // ggml synchronises its workers with barriers, so one thread landing on a busy or
+        // low-power core stalls all of them. Four threads are close to the optimum on hybrid
+        // (P/E-core) laptops and degrade gracefully under load; users with big desktops can raise it.
         let threads = if cfg.threads == 0 {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8) as i32
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 4) as i32
         } else {
             cfg.threads as i32
         };
-        Ok(Self { model_path, model_url, threads, ctx: Mutex::new(None) })
+        Ok(Self { model_path, model_url, threads, fast_short_audio: cfg.fast_short_audio, ctx: Mutex::new(None) })
     }
 
     fn ensure_model(&self) -> Result<()> {
@@ -108,8 +120,13 @@ impl Transcriber for WhisperTranscriber {
             audio.resize(min_len, 0.0);
         }
 
+        let secs = pcm.len() as f32 / crate::audio::TARGET_RATE as f32;
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
         params.set_n_threads(self.threads);
+        let audio_ctx = if self.fast_short_audio { audio_ctx_for(secs) } else { 0 };
+        if audio_ctx > 0 && audio_ctx < 1500 {
+            params.set_audio_ctx(audio_ctx);
+        }
         params.set_translate(false);
         params.set_no_context(true);
         params.set_single_segment(false);
@@ -139,8 +156,10 @@ impl Transcriber for WhisperTranscriber {
         }
         let cleaned = clean_transcript(&text);
         info!(
-            audio_secs = pcm.len() as f32 / crate::audio::TARGET_RATE as f32,
+            audio_secs = secs,
             elapsed_ms = started.elapsed().as_millis() as u64,
+            audio_ctx,
+            threads = self.threads,
             chars = cleaned.len(),
             "whisper transcription done"
         );

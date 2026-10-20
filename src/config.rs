@@ -32,11 +32,23 @@ pub struct HotkeyConfig {
     pub max_duration_secs: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioConfig {
     /// Substring of the input device name. Empty = system default.
     pub device: String,
+    /// Keep the microphone stream open all the time so a dictation starts instantly and the
+    /// first syllable is not lost while the driver spins up.
+    pub always_on: bool,
+    /// Audio captured *before* the chord was pressed that is prepended to the recording
+    /// (only with `always_on`).
+    pub preroll_ms: u64,
+}
+
+impl Default for AudioConfig {
+    fn default() -> Self {
+        Self { device: String::new(), always_on: true, preroll_ms: 300 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,6 +74,9 @@ pub struct WhisperConfig {
     pub model_path: String,
     /// 0 = number of available cores.
     pub threads: usize,
+    /// Shrink whisper's audio context for short clips (big speed-up for typical dictations,
+    /// marginal accuracy cost). Clips longer than ~25 s always use the full context.
+    pub fast_short_audio: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,7 +168,7 @@ impl Default for SttConfig {
 
 impl Default for WhisperConfig {
     fn default() -> Self {
-        Self { model: "base".into(), model_path: String::new(), threads: 0 }
+        Self { model: "base".into(), model_path: String::new(), threads: 0, fast_short_audio: false }
     }
 }
 
