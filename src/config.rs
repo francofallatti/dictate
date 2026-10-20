@@ -141,6 +141,8 @@ pub struct HistoryConfig {
 pub struct UiConfig {
     pub sounds: bool,
     pub tray: bool,
+    /// Hub window theme; toggled with the sun/moon button in the sidebar.
+    pub dark_mode: bool,
 }
 
 impl Default for HotkeyConfig {
@@ -231,7 +233,7 @@ impl Default for HistoryConfig {
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { sounds: true, tray: true }
+        Self { sounds: true, tray: true, dark_mode: false }
     }
 }
 

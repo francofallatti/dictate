@@ -132,15 +132,114 @@ pub struct PanelApp {
     log_loaded_at: Option<Instant>,
 }
 
-const SIDEBAR_BG: Color32 = Color32::from_rgb(246, 246, 248);
-const PANEL_BG: Color32 = Color32::from_rgb(250, 250, 251);
-const CARD_BG: Color32 = Color32::WHITE;
-const CARD_STROKE: Color32 = Color32::from_rgb(228, 228, 232);
 const ACCENT: Color32 = Color32::from_rgb(93, 95, 239);
-const MUTED: Color32 = Color32::from_rgb(120, 120, 130);
 const OK_GREEN: Color32 = Color32::from_rgb(34, 139, 84);
 const WARN_ORANGE: Color32 = Color32::from_rgb(203, 118, 22);
 const ERR_RED: Color32 = Color32::from_rgb(200, 60, 60);
+
+// ---------------------------------------------------------------- theme
+// The palette is read through these functions so every widget follows the toggle at once.
+
+static DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_dark() -> bool {
+    DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn set_dark(ctx: &egui::Context, dark: bool) {
+    DARK.store(dark, std::sync::atomic::Ordering::Relaxed);
+    ctx.set_visuals(visuals_for(dark));
+}
+
+fn pick(light: Color32, dark: Color32) -> Color32 {
+    if is_dark() { dark } else { light }
+}
+fn sidebar_bg() -> Color32 {
+    pick(Color32::from_rgb(246, 246, 248), Color32::from_rgb(24, 24, 29))
+}
+fn panel_bg() -> Color32 {
+    pick(Color32::from_rgb(250, 250, 251), Color32::from_rgb(30, 30, 36))
+}
+fn card_bg() -> Color32 {
+    pick(Color32::WHITE, Color32::from_rgb(40, 40, 48))
+}
+fn card_stroke() -> Color32 {
+    pick(Color32::from_rgb(228, 228, 232), Color32::from_rgb(58, 58, 68))
+}
+fn muted() -> Color32 {
+    pick(Color32::from_rgb(120, 120, 130), Color32::from_rgb(150, 150, 162))
+}
+fn text_dim() -> Color32 {
+    pick(Color32::from_rgb(60, 60, 70), Color32::from_rgb(200, 200, 210))
+}
+fn accent() -> Color32 {
+    pick(ACCENT, Color32::from_rgb(138, 140, 255))
+}
+fn ok_green() -> Color32 {
+    pick(OK_GREEN, Color32::from_rgb(78, 190, 128))
+}
+fn err_red() -> Color32 {
+    pick(ERR_RED, Color32::from_rgb(240, 100, 100))
+}
+
+/// A small button showing a painted sun (in dark mode) or crescent moon (in light mode).
+/// Painted rather than typed because egui's default fonts have no ☀/☾ glyphs.
+fn theme_toggle_button(ui: &mut egui::Ui, dark: bool) -> egui::Response {
+    let size = egui::vec2(34.0, 26.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&resp);
+        let painter = ui.painter();
+        painter.rect(rect, visuals.corner_radius, visuals.weak_bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+        let c = rect.center();
+        let color = visuals.fg_stroke.color;
+        if dark {
+            // Sun: disc plus eight rays.
+            painter.circle_filled(c, 4.0, color);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                let dir = egui::vec2(a.cos(), a.sin());
+                painter.line_segment([c + dir * 6.0, c + dir * 8.5], Stroke::new(1.5, color));
+            }
+        } else {
+            // Crescent: a disc with a second disc of the button colour cut out of it.
+            painter.circle_filled(c, 6.5, color);
+            painter.circle_filled(c + egui::vec2(3.0, -2.0), 5.5, visuals.weak_bg_fill);
+        }
+    }
+    resp
+}
+
+fn visuals_for(dark: bool) -> egui::Visuals {
+    if dark {
+        let mut v = egui::Visuals::dark();
+        v.panel_fill = Color32::from_rgb(30, 30, 36);
+        v.window_fill = Color32::from_rgb(40, 40, 48);
+        v.extreme_bg_color = Color32::from_rgb(22, 22, 27);
+        v.selection.bg_fill = Color32::from_rgb(138, 140, 255).gamma_multiply(0.30);
+        v.selection.stroke = Stroke::new(1.0, Color32::from_rgb(138, 140, 255));
+        v.widgets.inactive.bg_fill = Color32::from_rgb(52, 52, 62);
+        v.widgets.inactive.weak_bg_fill = Color32::from_rgb(52, 52, 62);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(58, 58, 68));
+        v.widgets.hovered.bg_fill = Color32::from_rgb(66, 66, 78);
+        v.widgets.hovered.weak_bg_fill = Color32::from_rgb(66, 66, 78);
+        v.widgets.active.bg_fill = Color32::from_rgb(138, 140, 255).gamma_multiply(0.35);
+        v.override_text_color = Some(Color32::from_rgb(228, 228, 235));
+        v
+    } else {
+        let mut v = egui::Visuals::light();
+        v.panel_fill = Color32::from_rgb(250, 250, 251);
+        v.window_fill = Color32::WHITE;
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.18);
+        v.selection.stroke = Stroke::new(1.0, ACCENT);
+        v.widgets.hovered.bg_fill = Color32::from_rgb(236, 236, 242);
+        v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.25);
+        // Text fields sit on white cards; give them a visible well and border.
+        v.extreme_bg_color = Color32::from_rgb(243, 243, 246);
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(228, 228, 232));
+        v
+    }
+}
 
 /// Starts the panel event loop on the calling (main) thread. Returns when the window closes
 /// for real (quit), not when the user hides it.
@@ -158,6 +257,7 @@ pub fn run(
             .with_app_id("dictate")
             .with_inner_size([960.0, 620.0])
             .with_min_inner_size([800.0, 520.0])
+            .with_position([120.0, 80.0])
             .with_visible(start_visible)
             .with_icon(icon),
         ..Default::default()
@@ -167,7 +267,7 @@ pub fn run(
         "Dictate",
         options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(light_visuals());
+            set_dark(&cc.egui_ctx, draft.ui.dark_mode);
             link.attach(cc.egui_ctx.clone());
             let chord_text = draft.hotkey.chord.join(" + ");
             Ok(Box::new(PanelApp {
@@ -193,20 +293,6 @@ pub fn run(
     )
 }
 
-fn light_visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::light();
-    v.panel_fill = Color32::from_rgb(250, 250, 251);
-    v.window_fill = Color32::WHITE;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.18);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
-    v.widgets.hovered.bg_fill = Color32::from_rgb(236, 236, 242);
-    v.widgets.active.bg_fill = ACCENT.gamma_multiply(0.25);
-    // Text fields sit on white cards; give them a visible well and border.
-    v.extreme_bg_color = Color32::from_rgb(243, 243, 246);
-    v.widgets.inactive.bg_stroke = Stroke::new(1.0, CARD_STROKE);
-    v
-}
-
 fn window_icon() -> egui::IconData {
     const S: u32 = 64;
     let mut rgba = Vec::with_capacity((S * S * 4) as usize);
@@ -215,7 +301,7 @@ fn window_icon() -> egui::IconData {
         for x in 0..S {
             let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
             let a = if d <= c - 1.0 { 255 } else if d <= c { ((c - d) * 255.0) as u8 } else { 0 };
-            rgba.extend_from_slice(&[ACCENT.r(), ACCENT.g(), ACCENT.b(), a]);
+            rgba.extend_from_slice(&[accent().r(), accent().g(), accent().b(), a]);
         }
     }
     egui::IconData { rgba, width: S, height: S }
@@ -241,11 +327,11 @@ impl eframe::App for PanelApp {
         egui::Panel::left("nav")
             .resizable(false)
             .exact_size(200.0)
-            .frame(egui::Frame::new().fill(SIDEBAR_BG).inner_margin(Margin::symmetric(14, 18)))
+            .frame(egui::Frame::new().fill(sidebar_bg()).inner_margin(Margin::symmetric(14, 18)))
             .show(root, |ui| self.sidebar(ui));
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PANEL_BG).inner_margin(Margin::symmetric(28, 22)))
+            .frame(egui::Frame::new().fill(panel_bg()).inner_margin(Margin::symmetric(28, 22)))
             .show(root, |ui| match self.page {
                 Page::Home => self.home(ui),
                 Page::Settings => self.settings(ui),
@@ -270,13 +356,13 @@ impl PanelApp {
             ui.heading(RichText::new("Dictate").strong());
         });
         ui.add_space(2.0);
-        ui.label(RichText::new(state_label(state, ready)).small().color(MUTED));
+        ui.label(RichText::new(state_label(state, ready)).small().color(muted()));
         ui.add_space(18.0);
 
         for (page, label) in [(Page::Home, "Inicio"), (Page::Settings, "Configuración"), (Page::Diagnostics, "Diagnóstico")] {
             let selected = self.page == page;
             let text = RichText::new(label).size(15.0);
-            let text = if selected { text.strong().color(ACCENT) } else { text };
+            let text = if selected { text.strong().color(accent()) } else { text };
             let resp = ui.add_sized([ui.available_width(), 32.0], egui::Button::selectable(selected, text));
             if resp.clicked() {
                 self.page = page;
@@ -284,12 +370,25 @@ impl PanelApp {
         }
 
         ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            if ui.button("Salir de Dictate").clicked() {
-                let _ = self.cmd_tx.send(PanelCommand::Quit);
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Salir de Dictate").clicked() {
+                    let _ = self.cmd_tx.send(PanelCommand::Quit);
+                }
+                let dark = is_dark();
+                let tip = if dark { "Cambiar a modo claro" } else { "Cambiar a modo oscuro" };
+                if theme_toggle_button(ui, dark).on_hover_text(tip).clicked() {
+                    set_dark(ui.ctx(), !dark);
+                    self.draft.ui.dark_mode = !dark;
+                    let mut s = self.shared.lock().unwrap();
+                    s.config.ui.dark_mode = !dark;
+                    if let Err(e) = s.config.save(&self.paths.config_file) {
+                        tracing::warn!(error = %e, "could not persist theme");
+                    }
+                }
+            });
             ui.add_space(6.0);
-            ui.label(RichText::new(format!("Mantené {chord} para dictar")).small().color(MUTED));
-            ui.label(RichText::new("Doble toque: manos libres · Esc: cancelar").small().color(MUTED));
+            ui.label(RichText::new(format!("Mantené {chord} para dictar")).small().color(muted()));
+            ui.label(RichText::new("Doble toque: manos libres · Esc: cancelar").small().color(muted()));
         });
     }
 
@@ -337,7 +436,7 @@ impl PanelApp {
                 ui.vertical_centered(|ui| {
                     ui.add_space(30.0);
                     ui.label(RichText::new("Todavía no hay dictados").size(16.0).strong());
-                    ui.label(RichText::new("Cuando dictes en cualquier app, el historial completo va a aparecer acá.").color(MUTED));
+                    ui.label(RichText::new("Cuando dictes en cualquier app, el historial completo va a aparecer acá.").color(muted()));
                     ui.add_space(30.0);
                 });
             });
@@ -357,7 +456,7 @@ impl PanelApp {
             .cloned()
             .collect();
         if !needle.is_empty() {
-            ui.label(RichText::new(format!("{} resultado(s)", filtered.len())).small().color(MUTED));
+            ui.label(RichText::new(format!("{} resultado(s)", filtered.len())).small().color(muted()));
         }
 
         let mut to_delete: Option<String> = None;
@@ -369,7 +468,7 @@ impl PanelApp {
                 if day != current_day {
                     current_day = day.clone();
                     ui.add_space(8.0);
-                    ui.label(RichText::new(day).small().strong().color(MUTED));
+                    ui.label(RichText::new(day).small().strong().color(muted()));
                     ui.add_space(2.0);
                 }
                 self.history_row(ui, rec, &mut copy, &mut to_delete);
@@ -424,31 +523,31 @@ impl PanelApp {
         let id = rec.timestamp.clone();
         let expanded = self.expanded.as_deref() == Some(id.as_str());
         let status = if rec.final_text.trim().is_empty() {
-            ("vacío", MUTED)
+            ("vacío", muted())
         } else if rec.pasted {
-            ("pegado", OK_GREEN)
+            ("pegado", ok_green())
         } else {
-            ("no pegado", ERR_RED)
+            ("no pegado", err_red())
         };
 
         egui::Frame::new()
-            .fill(CARD_BG)
-            .stroke(Stroke::new(1.0, CARD_STROKE))
+            .fill(card_bg())
+            .stroke(Stroke::new(1.0, card_stroke()))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::symmetric(14, 10))
             .outer_margin(Margin::symmetric(0, 3))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(time_label(&rec.timestamp)).monospace().color(MUTED));
+                    ui.label(RichText::new(time_label(&rec.timestamp)).monospace().color(muted()));
                     ui.label(RichText::new(app_label(&rec.app)).strong());
                     chip(ui, status.0, status.1);
                     if rec.format_backend != "none" {
-                        chip(ui, &format!("IA: {}", rec.format_backend), ACCENT);
+                        chip(ui, &format!("IA: {}", rec.format_backend), accent());
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if self.confirm_delete.as_deref() == Some(id.as_str()) {
-                            if ui.button(RichText::new("Sí, eliminar").color(ERR_RED)).clicked() {
+                            if ui.button(RichText::new("Sí, eliminar").color(err_red())).clicked() {
                                 *to_delete = Some(id.clone());
                                 self.confirm_delete = None;
                             }
@@ -470,7 +569,7 @@ impl PanelApp {
                 });
                 ui.add_space(4.0);
                 let text = if rec.final_text.trim().is_empty() {
-                    RichText::new("(sin palabras detectadas)").italics().color(MUTED)
+                    RichText::new("(sin palabras detectadas)").italics().color(muted())
                 } else {
                     RichText::new(rec.final_text.clone()).size(14.5)
                 };
@@ -479,20 +578,20 @@ impl PanelApp {
                     ui.add_space(6.0);
                     ui.separator();
                     egui::Grid::new(format!("det-{id}")).num_columns(2).spacing([18.0, 4.0]).show(ui, |ui| {
-                        ui.label(RichText::new("Ventana").color(MUTED));
+                        ui.label(RichText::new("Ventana").color(muted()));
                         ui.label(&rec.window_title);
                         ui.end_row();
-                        ui.label(RichText::new("Audio").color(MUTED));
+                        ui.label(RichText::new("Audio").color(muted()));
                         ui.label(format!("{:.1} s", rec.audio_secs));
                         ui.end_row();
-                        ui.label(RichText::new("Transcripción").color(MUTED));
+                        ui.label(RichText::new("Transcripción").color(muted()));
                         ui.label(format!("{} · {} ms", rec.stt_backend, rec.stt_ms));
                         ui.end_row();
-                        ui.label(RichText::new("Formateo").color(MUTED));
+                        ui.label(RichText::new("Formateo").color(muted()));
                         ui.label(format!("{} · {} ms", rec.format_backend, rec.format_ms));
                         ui.end_row();
                         if rec.raw_text != rec.final_text {
-                            ui.label(RichText::new("Texto crudo").color(MUTED));
+                            ui.label(RichText::new("Texto crudo").color(muted()));
                             ui.add(egui::Label::new(&rec.raw_text).wrap());
                             ui.end_row();
                         }
@@ -507,7 +606,7 @@ impl PanelApp {
         ui.horizontal(|ui| {
             ui.heading(RichText::new("Configuración").size(22.0).strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let save = egui::Button::new(RichText::new("Guardar y aplicar").color(Color32::WHITE)).fill(ACCENT);
+                let save = egui::Button::new(RichText::new("Guardar y aplicar").color(Color32::WHITE)).fill(accent());
                 if ui.add(save).clicked() {
                     self.save_settings();
                 }
@@ -516,13 +615,13 @@ impl PanelApp {
                 }
                 if let Some(t) = self.settings_saved_at {
                     if t.elapsed().as_secs() < 4 {
-                        ui.label(RichText::new("Guardado ✓").color(OK_GREEN));
+                        ui.label(RichText::new("Guardado ✓").color(ok_green()));
                     }
                 }
             });
         });
         if let Some(err) = &self.settings_error {
-            ui.colored_label(ERR_RED, err);
+            ui.colored_label(err_red(), err);
         }
         ui.add_space(8.0);
 
@@ -537,14 +636,14 @@ impl PanelApp {
                             match Chord::parse(&names) {
                                 Ok(c) => {
                                     self.draft.hotkey.chord = names;
-                                    ui.label(RichText::new(c.describe()).color(MUTED));
+                                    ui.label(RichText::new(c.describe()).color(muted()));
                                 }
                                 Err(e) => self.chord_error = Some(e.to_string()),
                             }
                         } else if let Some(e) = &self.chord_error {
-                            ui.colored_label(ERR_RED, e);
+                            ui.colored_label(err_red(), e);
                         } else if let Ok(c) = Chord::parse(&self.draft.hotkey.chord) {
-                            ui.label(RichText::new(c.describe()).color(MUTED));
+                            ui.label(RichText::new(c.describe()).color(muted()));
                         }
                     });
                     row(ui, "Ventana de doble toque", "ms para detectar el doble toque (manos libres)", |ui| {
@@ -616,7 +715,7 @@ impl PanelApp {
                         });
                         row(ui, "API key", "o dejá vacío y usá la variable de entorno", |ui| {
                             ui.add(egui::TextEdit::singleline(&mut self.draft.stt.openai.api_key).password(true).desired_width(300.0));
-                            ui.label(RichText::new(format!("env: {}", self.draft.stt.openai.api_key_env)).small().color(MUTED));
+                            ui.label(RichText::new(format!("env: {}", self.draft.stt.openai.api_key_env)).small().color(muted()));
                         });
                         row(ui, "Base URL", "", |ui| {
                             ui.add(egui::TextEdit::singleline(&mut self.draft.stt.openai.base_url).desired_width(300.0));
@@ -644,7 +743,7 @@ impl PanelApp {
                             });
                             row(ui, "API key", "o dejá vacío y usá la variable de entorno", |ui| {
                                 ui.add(egui::TextEdit::singleline(&mut self.draft.format.claude.api_key).password(true).desired_width(300.0));
-                                ui.label(RichText::new(format!("env: {}", self.draft.format.claude.api_key_env)).small().color(MUTED));
+                                ui.label(RichText::new(format!("env: {}", self.draft.format.claude.api_key_env)).small().color(muted()));
                             });
                         }
                         "openai" => {
@@ -653,7 +752,7 @@ impl PanelApp {
                             });
                             row(ui, "API key", "o dejá vacío y usá la variable de entorno", |ui| {
                                 ui.add(egui::TextEdit::singleline(&mut self.draft.format.openai.api_key).password(true).desired_width(300.0));
-                                ui.label(RichText::new(format!("env: {}", self.draft.format.openai.api_key_env)).small().color(MUTED));
+                                ui.label(RichText::new(format!("env: {}", self.draft.format.openai.api_key_env)).small().color(muted()));
                             });
                         }
                         _ => {}
@@ -734,14 +833,14 @@ impl PanelApp {
 
         card(ui, |ui| {
             egui::Grid::new("diag").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
-                ui.label(RichText::new("Estado").color(MUTED));
+                ui.label(RichText::new("Estado").color(muted()));
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
                     ui.painter().circle_filled(r.center(), 5.0, state_color(state));
                     ui.label(state_label(state, ready));
                 });
                 ui.end_row();
-                ui.label(RichText::new("Motor de voz").color(MUTED));
+                ui.label(RichText::new("Motor de voz").color(muted()));
                 ui.horizontal(|ui| {
                     ui.label(format!("{stt} · {}", if ready { "listo" } else { "cargando" }));
                     if ui.small_button("Recargar").clicked() {
@@ -749,30 +848,30 @@ impl PanelApp {
                     }
                 });
                 ui.end_row();
-                ui.label(RichText::new("Formateo").color(MUTED));
+                ui.label(RichText::new("Formateo").color(muted()));
                 ui.label(fmt);
                 ui.end_row();
-                ui.label(RichText::new("Micrófono").color(MUTED));
+                ui.label(RichText::new("Micrófono").color(muted()));
                 ui.label(mic);
                 ui.end_row();
-                ui.label(RichText::new("Atajo").color(MUTED));
+                ui.label(RichText::new("Atajo").color(muted()));
                 ui.label(chord);
                 ui.end_row();
-                ui.label(RichText::new("Trabajos en curso").color(MUTED));
+                ui.label(RichText::new("Trabajos en curso").color(muted()));
                 ui.label(jobs.to_string());
                 ui.end_row();
                 if let Some(e) = backend_error {
-                    ui.label(RichText::new("Error del motor").color(ERR_RED));
-                    ui.add(egui::Label::new(RichText::new(e).color(ERR_RED)).wrap());
+                    ui.label(RichText::new("Error del motor").color(err_red()));
+                    ui.add(egui::Label::new(RichText::new(e).color(err_red())).wrap());
                     ui.end_row();
                 }
                 if let Some(e) = last_error {
-                    ui.label(RichText::new("Último error").color(ERR_RED));
-                    ui.add(egui::Label::new(RichText::new(e).color(ERR_RED)).wrap());
+                    ui.label(RichText::new("Último error").color(err_red()));
+                    ui.add(egui::Label::new(RichText::new(e).color(err_red())).wrap());
                     ui.end_row();
                 }
                 if let Some(r) = last_result {
-                    ui.label(RichText::new("Último dictado").color(MUTED));
+                    ui.label(RichText::new("Último dictado").color(muted()));
                     ui.add(egui::Label::new(r).wrap());
                     ui.end_row();
                 }
@@ -795,7 +894,7 @@ impl PanelApp {
 
         ui.columns(2, |cols| {
             cols[0].label(RichText::new("Eventos de la sesión").strong());
-            egui::Frame::new().fill(CARD_BG).stroke(Stroke::new(1.0, CARD_STROKE)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(8)).show(&mut cols[0], |ui| {
+            egui::Frame::new().fill(card_bg()).stroke(Stroke::new(1.0, card_stroke())).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(8)).show(&mut cols[0], |ui| {
                 egui::ScrollArea::vertical().id_salt("events").stick_to_bottom(true).max_height(360.0).auto_shrink([false, false]).show(ui, |ui| {
                     for e in &events {
                         ui.label(RichText::new(e).monospace().size(11.5));
@@ -808,11 +907,11 @@ impl PanelApp {
                 self.log_tail = read_log_tail(&self.paths.log_dir, 200);
                 self.log_loaded_at = Some(Instant::now());
             }
-            egui::Frame::new().fill(CARD_BG).stroke(Stroke::new(1.0, CARD_STROKE)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(8)).show(&mut cols[1], |ui| {
+            egui::Frame::new().fill(card_bg()).stroke(Stroke::new(1.0, card_stroke())).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(8)).show(&mut cols[1], |ui| {
                 egui::ScrollArea::both().id_salt("logtail").stick_to_bottom(true).max_height(360.0).auto_shrink([false, false]).show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     for l in &self.log_tail {
-                        let color = if l.contains("ERROR") { ERR_RED } else if l.contains("WARN") { WARN_ORANGE } else { Color32::from_rgb(60, 60, 70) };
+                        let color = if l.contains("ERROR") { err_red() } else if l.contains("WARN") { WARN_ORANGE } else { text_dim() };
                         ui.label(RichText::new(l).monospace().size(11.0).color(color));
                     }
                 });
@@ -871,7 +970,7 @@ fn state_color(s: AppState) -> Color32 {
     match s {
         AppState::Loading => Color32::from_rgb(170, 170, 178),
         AppState::Idle => Color32::from_rgb(90, 90, 100),
-        AppState::Listening => ERR_RED,
+        AppState::Listening => err_red(),
         AppState::Locked => WARN_ORANGE,
         AppState::Processing => Color32::from_rgb(38, 139, 210),
         AppState::Error => Color32::from_rgb(181, 137, 0),
@@ -892,8 +991,8 @@ fn state_label(s: AppState, ready: bool) -> &'static str {
 
 fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
-        .fill(CARD_BG)
-        .stroke(Stroke::new(1.0, CARD_STROKE))
+        .fill(card_bg())
+        .stroke(Stroke::new(1.0, card_stroke()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(16, 12))
         .show(ui, |ui| {
@@ -918,7 +1017,7 @@ fn row(ui: &mut egui::Ui, label: &str, hint: &str, add: impl FnOnce(&mut egui::U
     ui.vertical(|ui| {
         ui.label(RichText::new(label).strong());
         if !hint.is_empty() {
-            ui.label(RichText::new(hint).small().color(MUTED));
+            ui.label(RichText::new(hint).small().color(muted()));
         }
     });
     ui.horizontal_wrapped(add);
@@ -927,15 +1026,15 @@ fn row(ui: &mut egui::Ui, label: &str, hint: &str, add: impl FnOnce(&mut egui::U
 
 fn stat_tile(ui: &mut egui::Ui, width: f32, value: &str, label: &str) {
     egui::Frame::new()
-        .fill(CARD_BG)
-        .stroke(Stroke::new(1.0, CARD_STROKE))
+        .fill(card_bg())
+        .stroke(Stroke::new(1.0, card_stroke()))
         .corner_radius(CornerRadius::same(10))
         .inner_margin(Margin::symmetric(16, 10))
         .show(ui, |ui| {
             ui.set_width((width - 34.0).max(80.0));
             ui.vertical(|ui| {
                 ui.label(RichText::new(value).size(22.0).strong());
-                ui.add(egui::Label::new(RichText::new(label).small().color(MUTED)).wrap());
+                ui.add(egui::Label::new(RichText::new(label).small().color(muted())).wrap());
             });
         });
 }

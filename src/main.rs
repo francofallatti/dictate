@@ -525,6 +525,9 @@ fn orchestrate(
                     continue;
                 }
                 note(&format!("grabación de {secs:.1}s ({level:.0} dBFS), procesando"));
+                if recorder.error_count() > 2 {
+                    note(&format!("aviso: el driver de audio reportó {} errores de stream", recorder.error_count()));
+                }
                 if sounds { ui::play(Sound::Stop); }
                 set_state(AppState::Processing);
                 jobs_in_flight += 1;

@@ -34,6 +34,8 @@ no accounts, local transcription by default, optional cloud backends you control
     hot-reloads the chord, microphone and backends without restarting;
   - *Diagnóstico*: live state, backend/mic/chord, in-flight jobs, last error, a session event
     stream and the tail of today's log. Closing the window only hides it.
+  - Light and dark themes: the sun/moon button next to "Salir de Dictate" toggles and persists
+    the choice (`ui.dark_mode`).
 - **CLI mode** for testing backends without a microphone: `dictate --transcribe file.wav`.
 
 ## Build
